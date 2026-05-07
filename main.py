@@ -1,113 +1,58 @@
-import cv2
-import time
-import pyautogui
-import mediapipe as mp
+from hf import generate_response
+from groq import generate_response as groq_generate_response
+import re
+import streamlit as st
 
-mp_hands = mp.solutions.hands
-mp_draw = mp.solutions.drawing_utils
+def looks_incomplete(text: str) -> bool:
+    if not text or len(text.strip()) < 10:
+        return True
+    t = text.strip()
+    if t.endswith(("***", "*", "-", "—", ":", ",", "(", "[", "{")):
+        return True
+    if re.search(r"\d+\.\s*\*\*\s*", t):  
+        return True
+    if not re.search(r"[.!?]\s*$", t): 
+        return True
+    return False
 
-hands = mp_hands.Hands(
-    static_image_mode=False,
-    max_num_hands=1,
-    min_detection_confidence=0.7,
-    min_tracking_confidence=0.7
-)
-
-SCROLL_SPEED = 300
-SCROLL_DELAY = 1
-CAM_WIDTH, CAM_HEIGHT = 640, 480
-
-
-def detect_gesture(landmarks, handedness):
-    fingers = []
-
-    tips = [
-        mp_hands.HandLandmark.INDEX_FINGER_TIP,
-        mp_hands.HandLandmark.MIDDLE_FINGER_TIP,
-        mp_hands.HandLandmark.RING_FINGER_TIP,
-        mp_hands.HandLandmark.PINKY_TIP
-    ]
-    for tip in tips:
-        if landmarks.landmark[tip].y < landmarks.landmark[tip - 2].y:
-            fingers.append(1)
-        else:
-            fingers.append(0)
-
-    thumb_tip = landmarks.landmark[mp_hands.HandLandmark.THUMB_TIP]
-    thumb_ip = landmarks.landmark[mp_hands.HandLandmark.THUMB_IP]
-
-    if (handedness == "Right" and thumb_tip.x > thumb_ip.x) or \
-       (handedness == "Left" and thumb_tip.x < thumb_ip.x):
-        fingers.append(1)
-    else:
-        fingers.append(0)
-
-    if fingers == [1, 1, 1, 1, 1]:
-        return "scroll_up"
-    elif fingers == [0, 0, 0, 0, 0]:
-        return "scroll_down"
-    else:
-        return "none"
-
-
-cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_WIDTH)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_HEIGHT)
-
-last_scroll = 0
-p_time = 0
-
-print("Gesture scrolling started. Press 'q' to exit.")
-
-while cap.isOpened():
-    success, img = cap.read()
-    if not success:
-        break
-
-    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    results = hands.process(img_rgb)
-
-    if results.multi_hand_landmarks and results.multi_handedness:
-        for hand_landmarks, hand_info in zip(
-                results.multi_hand_landmarks,
-                results.multi_handedness):
-
-            handedness = hand_info.classification[0].label
-            gesture = detect_gesture(hand_landmarks, handedness)
-
-            mp_draw.draw_landmarks(
-                img,
-                hand_landmarks,
-                mp_hands.HAND_CONNECTIONS
-            )
-
-            if time.time() - last_scroll > SCROLL_DELAY:
-                if gesture == "scroll_up":
-                    pyautogui.scroll(SCROLL_SPEED)
-                    last_scroll = time.time()
-                elif gesture == "scroll_down":
-                    pyautogui.scroll(-SCROLL_SPEED)
-                    last_scroll = time.time()
-
-    c_time = time.time()
-    fps = 1 / (c_time - p_time) if (c_time - p_time) > 0 else 0
-    p_time = c_time
-
-    cv2.putText(
-        img,
-        f"FPS: {int(fps)}",
-        (10, 30),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        1,
-        (255, 0, 0),
-        2
+def complete_answer(question: str, max_rounds: int = 2) -> str:
+    base_prompt = (
+        "Answer clearly in numbered points. "
+        "Do not cut sentences. Finish each point fully.\n\n"
+        f"Question: {question}"
     )
 
-    cv2.imshow("Gesture Controlled Scrolling", img)
+    ans = generate_response(base_prompt, temperature=0.3, max_tokens=1024)
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+    rounds = 0
+    while rounds < max_rounds and looks_incomplete(ans):
+        cont_prompt = (
+            "Continue EXACTLY from where you stopped. "
+            "Do NOT repeat earlier text. "
+            "Finish the incomplete point and complete the answer.\n\n"
+            f"Question: {question}\n\n"
+            f"Answer so far:\n{ans}\n\nContinue:"
+            )
+        
+        more = generate_response(cont_prompt, temperature=0.3, max_tokens=1024)
+        ans = (ans.rstrip() + "\n" + more.lstrip()).strip()
+        rounds += 1
 
-cap.release()
-hands.close()
-cv2.destroyAllWindows()
+    return ans
+
+def main():
+    st.title("AI Teaching Assistant")
+    st.write("Welcome! You can ask me anything about various subjects, and I'll provide an answer.")
+
+    user_input = st.text_input("Enter your question here:")
+
+    if user_input:
+        st.write(f"**Your question:** {user_input}")
+        response = complete_answer(user_input)
+        st.write("**AI's answer:**")
+        st.markdown(response)  # markdown renders numbered points nicely
+    else:
+        st.info("Please enter a question to ask.")
+
+if __name__ == "__main__":
+    main()
